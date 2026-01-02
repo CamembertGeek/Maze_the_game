@@ -39,3 +39,17 @@ Thumbs.db
 # Optional: keep only config that matters
 # (Usually you DO want to commit Config/ and Content/)
 # =========================
+
+
+# Unreal generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# IDE / Visual Studio
+.vs/
+*.sln
+
+# Local backup folder
+_backup_git_untracked/
