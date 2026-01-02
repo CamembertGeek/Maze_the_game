@@ -1,0 +1,41 @@
+# =========================
+# Unreal Engine (Generated)
+# =========================
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# If you use local builds/plugins (optional)
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# =========================
+# Visual Studio / Rider / IDE
+# =========================
+.vs/
+*.sln
+*.VC.db
+*.VC.opendb
+*.VC.VC.opendb
+*.suo
+*.user
+*.userprefs
+*.log
+
+# Visual Studio build folders (optional)
+Debug/
+Release/
+x64/
+Win64/
+
+# =========================
+# OS junk
+# =========================
+Thumbs.db
+.DS_Store
+
+# =========================
+# Optional: keep only config that matters
+# (Usually you DO want to commit Config/ and Content/)
+# =========================
