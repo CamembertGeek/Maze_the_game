@@ -7,12 +7,11 @@
 #include "Math/TransformNonVectorized.h" // FTransform
 #include "Math/Vector.h"                // FVector
 #include "Logging/LogMacros.h"          // UE_LOG
+#include "Components/StaticMeshComponent.h"
 
 #include <vector>    // std::vector
 #include <cstdint>   // uint8_t
 #include <utility>   // std::pair
-#include <cstdlib>   // rand(), srand()
-#include <ctime>     // std::time() For the seed in rand()
 
 
 
@@ -23,7 +22,7 @@ class GenerateMaze {
 public:
 
 	// Generate a maze grid with Backtracking.
-	std::vector<uint8_t> BacktrackingMazeGenerator(int height = 100, int width = 101)
+	std::vector<uint8_t> BacktrackingMazeGenerator(FRandomStream& Rng, int height = 100, int width = 101)
 	{
 		// Initialisation of the maze grid.
 		std::vector<uint8_t> Grid(height * width, 1); // 1 = wall
@@ -116,7 +115,7 @@ public:
 
 				int NbNeighbor = neighbors.size();
 
-				int x = rand() % NbNeighbor; // We select a random neighbor
+				const int x = Rng.RandRange(0, NbNeighbor - 1); // We select a random neighbor
 
 				auto neighbor = neighbors[x];
 				int ni = neighbor.first;
@@ -164,97 +163,33 @@ public:
 
 AAMazeGenerator::AAMazeGenerator()
 {
-	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	// This actor does not need per-frame updates (performance friendly).
 	PrimaryActorTick.bCanEverTick = false;
 
-	// Create the HISM component that will hold all wall instances.
+	// Create a simple SceneComponent to serve as a stable root for all other components.
+	// Using a dedicated root makes it easier to move/rotate the whole actor in the level.
+	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	SetRootComponent(SceneRoot);
+
+	// Create a Hierarchical Instanced Static Mesh (HISM) component that will render
+	// all maze walls as instances of the same mesh (very efficient for large mazes).
 	WallInstances = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("WallInstances"));
+	WallInstances->SetupAttachment(SceneRoot);
 
-	// Make it the root component so its transform follows the actor
-	RootComponent = WallInstances;
-
-	// Optional: helps with performance; you can tweak later
+	// Walls are static geometry (no movement at runtime), so mark them as Static
+	// for better rendering/lighting performance.
 	WallInstances->SetMobility(EComponentMobility::Static);
 
+	// Create a StaticMeshComponent for the floor (single mesh scaled to maze size).
+	Floor = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Floor"));
+	Floor->SetupAttachment(SceneRoot);
+
+	// The floor also does not move at runtime.
+	Floor->SetMobility(EComponentMobility::Static);
 }
 
 
 
-void AAMazeGenerator::BeginPlay()
-{
-	Super::BeginPlay();
-
-	// Seed the random generator ONCE per play session.
-	// (If you call srand multiple times quickly, you may get identical mazes.)
-	srand(static_cast<unsigned>(time(nullptr)));
-
-	// Safety checks
-	if (!WallInstances)
-	{
-		UE_LOG(LogTemp, Error, TEXT("WallInstances is null. Component was not created."));
-		return;
-	}
-
-	if (!WallMesh)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("WallMesh is not assigned. Please assign a mesh in the editor."));
-		return;
-	}
-
-	// Assign the mesh that will be instanced for each wall cell
-	WallInstances->SetStaticMesh(WallMesh);
-
-	// Clear old instances (useful if you regenerate later)
-	WallInstances->ClearInstances();
-
-	// Generate the maze grid
-	GenerateMaze gen;
-	const int height = MazeHeight;
-	const int width = MazeWidth;
-
-	std::vector<uint8_t> grid = gen.BacktrackingMazeGenerator(height, width);
-
-	// Centering: we want the maze centered on the actor location.
-	// If CellSize = 100, each cell is 1 meter.
-	//
-	// Maze spans:
-	//  X size = height * CellSize
-	//  Y size = width  * CellSize
-	//
-	// Center offset moves the "origin cell (0,0)" so that the maze is centered around (0,0).
-	const float halfX = (static_cast<float>(height - 1) * CellSize) * 0.5f;
-	const float halfY = (static_cast<float>(width - 1) * CellSize) * 0.5f;
-
-	// We'll place walls at Z=0. You can later raise them or set a wall height.
-	const float Z = 0.0f;
-
-	// Add one instance per wall cell
-	for (int i = 0; i < height; ++i)
-	{
-		for (int j = 0; j < width; ++j)
-		{
-			const int idx = i * width + j;
-
-			// If it's a wall (1), spawn an instance
-			if (grid[idx] == 1)
-			{
-				// Position relative to the actor (maze centered)
-				const float X = (static_cast<float>(i) * CellSize) - halfX;
-				const float Y = (static_cast<float>(j) * CellSize) - halfY;
-
-				const FVector Location(X, Y, Z);
-
-				// Transform for this instance (no rotation, scale=1)
-				const FTransform InstanceTransform(FRotator::ZeroRotator, Location, FVector(1.0f, 1.0f, 1.0f));
-
-				WallInstances->AddInstance(InstanceTransform);
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("Maze generated: %dx%d, instances: %d"),
-		height, width, WallInstances->GetInstanceCount());
-}
 
 
 
@@ -267,6 +202,132 @@ void AAMazeGenerator::Tick(float DeltaTime)
 
 
 
+void AAMazeGenerator::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	BuildMaze(); // Visible in editor
+}
 
+void AAMazeGenerator::BeginPlay()
+{
+	Super::BeginPlay();
+	
+	// If you already see it in editor thanks to OnConstruction,
+	// you can skip rebuilding at runtime.
+	// (Leave this if you spawn the actor dynamically at runtime)
+	if (WallInstances->GetInstanceCount() == 0)
+	{
+		BuildMaze();
+	}
+}
 
+void AAMazeGenerator::BuildMaze()
+{
+	// ---- Safety checks ----
+	if (!WallInstances)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BuildMaze(): WallInstances is null."));
+		return;
+	}
+
+	if (!WallMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BuildMaze(): WallMesh is not assigned."));
+		return;
+	}
+
+	// ---- Prepare instancing ----
+	WallInstances->SetStaticMesh(WallMesh);
+	WallInstances->ClearInstances();
+
+	// ---- Generate maze grid (stable with Seed) ----
+	FRandomStream Rng(Seed);
+
+	GenerateMaze gen;
+	const int height = MazeHeight;
+	const int width = MazeWidth;
+
+	std::vector<uint8_t> grid = gen.BacktrackingMazeGenerator(Rng, height, width);
+
+	// ---- Centering (maze centered around actor origin) ----
+	const float halfX = (static_cast<float>(height - 1) * CellSize) * 0.5f;
+	const float halfY = (static_cast<float>(width - 1) * CellSize) * 0.5f;
+
+	// ---- Wall mesh bounds -> compute scale ----
+	const FBoxSphereBounds Bounds = WallMesh->GetBounds();
+	const FVector MeshSize = Bounds.BoxExtent * 2.0f;
+
+	if (MeshSize.X <= KINDA_SMALL_NUMBER || MeshSize.Y <= KINDA_SMALL_NUMBER || MeshSize.Z <= KINDA_SMALL_NUMBER)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BuildMaze(): WallMesh has invalid bounds size."));
+		return;
+	}
+
+	// Scale walls so that each cell is exactly CellSize wide/deep, and height = WallHeight
+	const float ScaleX = CellSize / MeshSize.X;
+	const float ScaleY = CellSize / MeshSize.Y;
+	const float ScaleZ = WallHeight / MeshSize.Z;
+
+	// Place walls on the floor even if pivot isn't centered
+	const float LocalBottomZ = Bounds.Origin.Z - Bounds.BoxExtent.Z;
+	const float ZOffset = -LocalBottomZ * ScaleZ;
+
+	// ---- Spawn wall instances ----
+	for (int i = 0; i < height; ++i)
+	{
+		for (int j = 0; j < width; ++j)
+		{
+			const int idx = i * width + j;
+
+			if (grid[idx] == 1) // wall
+			{
+				const float X = (static_cast<float>(i) * CellSize) - halfX;
+				const float Y = (static_cast<float>(j) * CellSize) - halfY;
+
+				const FTransform T(
+					FRotator::ZeroRotator,
+					FVector(X, Y, ZOffset),
+					FVector(ScaleX, ScaleY, ScaleZ)
+				);
+
+				WallInstances->AddInstance(T);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("BuildMaze(): %dx%d | Wall instances: %d"),
+		height, width, WallInstances->GetInstanceCount());
+
+	// ---- Floor auto scale ----
+	if (Floor && FloorMesh)
+	{
+		Floor->SetStaticMesh(FloorMesh);
+
+		// Total maze span in UU
+		const float MazeSpanX = height * CellSize;
+		const float MazeSpanY = width * CellSize;
+
+		const FBoxSphereBounds FB = FloorMesh->GetBounds();
+		const FVector FloorSize = FB.BoxExtent * 2.0f;
+
+		if (FloorSize.X <= KINDA_SMALL_NUMBER || FloorSize.Y <= KINDA_SMALL_NUMBER)
+		{
+			UE_LOG(LogTemp, Error, TEXT("BuildMaze(): FloorMesh has invalid bounds size."));
+			return;
+		}
+
+		const float ScaleX_Floor = MazeSpanX / FloorSize.X;
+		const float ScaleY_Floor = MazeSpanY / FloorSize.Y;
+
+		// Floor is attached to the root => use RELATIVE transforms
+		Floor->SetRelativeScale3D(FVector(ScaleX_Floor, ScaleY_Floor, 1.0f));
+		Floor->SetRelativeLocation(FVector(0.0f, 0.0f, FloorZ));
+
+		UE_LOG(LogTemp, Log, TEXT("BuildMaze(): Floor scale (X,Y) = (%.3f, %.3f)"),
+			ScaleX_Floor, ScaleY_Floor);
+
+		UE_LOG(LogTemp, Warning, TEXT("MazeSpanX=%.1f MazeSpanY=%.1f | FloorSizeX=%.1f FloorSizeY=%.1f | ScaleX=%.3f ScaleY=%.3f"),
+			MazeSpanX, MazeSpanY, FloorSize.X, FloorSize.Y, ScaleX_Floor, ScaleY_Floor);
+	}
+}
 

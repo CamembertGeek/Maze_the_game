@@ -36,6 +36,24 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Settings", meta = (ClampMin = "5"))
 	int32 MazeWidth = 101;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Settings", meta = (ClampMin = "10.0"))
+	float WallHeight = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Settings", meta = (ClampMin = "1.0"))
+	float WallThickness = 100.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Maze|Components")
+	UStaticMeshComponent* Floor = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Assets")
+	UStaticMesh* FloorMesh = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Settings", meta = (ClampMin = "0.0"))
+	float FloorZ = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Maze|Settings", meta = (ClampMin = "0"))
+	int32 Seed = 42;
 	
 public:	
 	// Sets default values for this actor's properties
@@ -50,4 +68,13 @@ public:
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
 
+
+protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
+
+private:
+	void BuildMaze();  // common function
+
 };
+
+
