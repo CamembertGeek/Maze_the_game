@@ -310,6 +310,10 @@ void AAMazeGenerator::BuildMaze()
 		const FBoxSphereBounds FB = FloorMesh->GetBounds();
 		const FVector FloorSize = FB.BoxExtent * 2.0f;
 
+		UE_LOG(LogTemp, Warning, TEXT("BuildMaze(): Floor=%s FloorMesh=%s"),
+			Floor ? TEXT("OK") : TEXT("NULL"),
+			FloorMesh ? *FloorMesh->GetName() : TEXT("NULL"));
+
 		if (FloorSize.X <= KINDA_SMALL_NUMBER || FloorSize.Y <= KINDA_SMALL_NUMBER)
 		{
 			UE_LOG(LogTemp, Error, TEXT("BuildMaze(): FloorMesh has invalid bounds size."));
@@ -321,7 +325,13 @@ void AAMazeGenerator::BuildMaze()
 
 		// Floor is attached to the root => use RELATIVE transforms
 		Floor->SetRelativeScale3D(FVector(ScaleX_Floor, ScaleY_Floor, 1.0f));
-		Floor->SetRelativeLocation(FVector(0.0f, 0.0f, FloorZ));
+
+		// Compensate pivot offset so the floor is centered under the maze
+		const float OffsetX = -FB.Origin.X * ScaleX_Floor;
+		const float OffsetY = -FB.Origin.Y * ScaleY_Floor;
+
+		// Put the floor at FloorZ (if you want it exactly at Z=FloorZ)
+		Floor->SetRelativeLocation(FVector(OffsetX, OffsetY, FloorZ));
 
 		UE_LOG(LogTemp, Log, TEXT("BuildMaze(): Floor scale (X,Y) = (%.3f, %.3f)"),
 			ScaleX_Floor, ScaleY_Floor);
