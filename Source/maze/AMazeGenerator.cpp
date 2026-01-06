@@ -12,6 +12,10 @@
 #include <vector>    // std::vector
 #include <cstdint>   // uint8_t
 #include <utility>   // std::pair
+#include <ctime>        // std::time
+#include <algorithm>    // std::random_shuffle
+#include <cstdlib>      // std::rand, std::srand
+#include <span>
 
 
 
@@ -142,8 +146,11 @@ public:
 
 		}
 
+		// Add Loops on the grid:
+		std::vector<uint8_t> GridWithLoops = AddLoops(Grid, Rng, height, width, 0.1f);
 
-		return Grid;
+
+		return GridWithLoops;
 	}
 
 	// Convert (i, j) into 1D index
@@ -153,8 +160,52 @@ public:
 	}
 
 	// Add Loops inside of the maze.
-	void AddLoops() {
+	std::vector<uint8_t> AddLoops(std::vector<uint8_t>& Grid, FRandomStream& Rng, int height, int width, float LoopFactor = 0.1) {
 
+		if (LoopFactor < 0.0f || LoopFactor > 1.0f) {
+			// Raise a value error
+			UE_LOG(LogTemp, Error, TEXT("LoopFactor must be between 0 and 1."));
+			return Grid;
+		}
+		
+		std::vector<uint8_t> LoopGrid = Grid; // Creation of a copy of the Maze grid.
+
+		std::vector<int> Walls;
+
+		for (int i = 1; i <= height - 2; ++i) {
+			for (int j = 1; j <= width - 2; ++j) {
+
+				int LoopGridIdx = Indexation(i, j, width);
+
+				bool LR = Grid[Indexation(i, j - 1, width)] == 0 && Grid[Indexation(i, j + 1, width)] == 0;
+				bool UD = Grid[Indexation(i - 1, j, width)] == 0 && Grid[Indexation(i + 1, j, width)] == 0;
+
+				if (Grid[LoopGridIdx] == 1 && (LR || UD))
+					Walls.push_back(LoopGridIdx);
+			}
+		}
+
+		// Select how many walls will be deleted:
+		int k = static_cast<int>(LoopFactor * static_cast<float>(Walls.size()));
+		k = FMath::Clamp(k, 0, static_cast<int>(Walls.size()));
+		if (k == 0)
+			return LoopGrid;
+
+		// Select random walls throuht the wall list and delet them.
+		// Fisher–Yates shuffle using FRandomStream (deterministic)
+		for (int i = static_cast<int>(Walls.size()) - 1; i > 0; --i)
+		{
+			const int j = Rng.RandRange(0, i);
+			std::swap(Walls[i], Walls[j]);
+		}
+
+		// Delet the selected walls:
+		for (int n = 0; n < k; ++n)
+		{
+			LoopGrid[Walls[n]] = 0;
+		}
+
+		return LoopGrid;
 	}
 };
 
