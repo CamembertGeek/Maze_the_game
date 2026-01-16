@@ -9,6 +9,10 @@
 #include "Logging/LogMacros.h"          // UE_LOG
 #include "Components/StaticMeshComponent.h"
 
+#if WITH_EDITOR
+#include "UObject/UnrealType.h" // FPropertyChangedEvent
+#endif
+
 #include <vector>    // std::vector
 #include <cstdint>   // uint8_t
 #include <utility>   // std::pair
@@ -207,6 +211,100 @@ public:
 
 		return LoopGrid;
 	}
+
+
+	std::vector<std::vector<uint8_t>> GenerateMultiLayerMaze(FRandomStream& Rng, int height = 100, int width = 101, int MinLayer = 7, int MaxLayer = 10, float ChanceForTheHolleToStay = 0.7, int minConnectorDistance = 5) {
+		
+		// First we randomly select a number of layer.
+		int NumLayer = Rng.RandRange(MinLayer, MaxLayer);
+
+		// Creation of the Mazes.
+		std::vector<std::vector<uint8_t>> MultiGrid;
+
+		for (int i = 0; i < NumLayer; ++i) {
+
+			std::vector<uint8_t> Grid = BacktrackingMazeGenerator(Rng, height, width);
+
+			MultiGrid.push_back(Grid);
+		}
+
+		// Now we dig holles between Maze grid.
+		for (int i = 0; i < NumLayer - 1; ++i) {
+
+			std::vector<uint8_t>& UpLayer = MultiGrid[i];
+			const std::vector<uint8_t>& DownLayer = MultiGrid[i + 1];
+
+			std::vector<int32> EligibleCellForDig;
+
+			for (int m = 0; m < height; ++m) {
+				for (int n = 0; n < width; ++n) {
+
+					int GridIdx = Indexation(m, n, width);
+
+					if (UpLayer[GridIdx] == 0 && DownLayer[GridIdx] == 0) {
+						EligibleCellForDig.push_back(GridIdx);
+					}
+				}
+			}
+
+			// Shuffle the Eligible Cells
+			for (int p = static_cast<int>(EligibleCellForDig.size()) - 1; p > 0; --p)
+			{
+				const int j = Rng.RandRange(0, p);
+				std::swap(EligibleCellForDig[p], EligibleCellForDig[j]);
+			}
+
+
+			if (EligibleCellForDig.empty()) {
+				continue;
+			}
+			
+			std::vector<int32> Holles{ EligibleCellForDig[0] };
+
+			for (int j = 1; j < static_cast<int>(EligibleCellForDig.size()); ++j)
+			{
+				const int32 Idx = EligibleCellForDig[j];
+
+				const int row = Idx / width;
+				const int col = Idx % width;
+
+				bool bFarEnough = true;
+
+				for (int k = 0; k < static_cast<int>(Holles.size()); ++k)
+				{
+					const int32 HolleIdx = Holles[k];
+					const int HolleRow = HolleIdx / width;
+					const int HolleCol = HolleIdx % width;
+
+					const int d = std::abs(row - HolleRow) + std::abs(col - HolleCol);
+
+					if (d < minConnectorDistance)
+					{
+						bFarEnough = false;
+						break;
+					}
+				}
+
+				if (bFarEnough)
+				{
+					Holles.push_back(Idx);
+				}
+			}
+
+			// We randomly delet some holle to avoid patern.
+			for (int u = 0; u < Holles.size(), ++u) {
+
+			}
+
+			// Adding of the holles in the grids, they will be represented by a 2.
+			for (int j = 0; j < Holles.size(); ++j) {
+				int HollesIdx = Holles[j];
+				UpLayer[HollesIdx] = 2;
+			}
+
+		}
+		return MultiGrid;
+	}
 };
 
 
@@ -262,11 +360,11 @@ void AAMazeGenerator::OnConstruction(const FTransform& Transform)
 void AAMazeGenerator::BeginPlay()
 {
 	Super::BeginPlay();
-	
-	// If you already see it in editor thanks to OnConstruction,
-	// you can skip rebuilding at runtime.
-	// (Leave this if you spawn the actor dynamically at runtime)
-	if (WallInstances->GetInstanceCount() == 0)
+
+	const bool bNeedWalls = (WallInstances && WallInstances->GetInstanceCount() == 0);
+	const bool bNeedFloor = (Floor && Floor->GetStaticMesh() == nullptr);
+
+	if (bNeedWalls || bNeedFloor)
 	{
 		BuildMaze();
 	}
@@ -391,4 +489,36 @@ void AAMazeGenerator::BuildMaze()
 			MazeSpanX, MazeSpanY, FloorSize.X, FloorSize.Y, ScaleX_Floor, ScaleY_Floor);
 	}
 }
+
+
+#if WITH_EDITOR
+void AAMazeGenerator::PostLoad()
+{
+	Super::PostLoad();
+	BuildMaze(); // When the level is re-charged
+}
+#endif
+
+#if WITH_EDITOR
+void AAMazeGenerator::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName PropName = PropertyChangedEvent.Property
+		? PropertyChangedEvent.Property->GetFName()
+		: NAME_None;
+
+	if (PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, Seed) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, MazeHeight) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, MazeWidth) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, CellSize) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, WallHeight) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, WallMesh) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorMesh) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorZ))
+	{
+		BuildMaze();
+	}
+}
+#endif
 

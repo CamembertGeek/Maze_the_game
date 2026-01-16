@@ -75,6 +75,12 @@ protected:
 private:
 	void BuildMaze();  // common function
 
+
+#if WITH_EDITOR
+	virtual void PostLoad() override;
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
 };
 
 
