@@ -20,6 +20,7 @@
 #include <algorithm>    // std::random_shuffle
 #include <cstdlib>      // std::rand, std::srand
 #include <span>
+#include <cmath> // std::abs
 
 
 
@@ -292,9 +293,20 @@ public:
 			}
 
 			// We randomly delet some holle to avoid patern.
-			for (int u = 0; u < Holles.size(), ++u) {
+			ChanceForTheHolleToStay = FMath::Clamp(ChanceForTheHolleToStay, 0.0f, 1.0f);
 
+			std::vector<int32> FilteredHoles;
+			FilteredHoles.reserve(Holles.size());
+
+			for (int u = 0; u < static_cast<int>(Holles.size()); ++u)
+			{
+				if (Rng.FRand() <= ChanceForTheHolleToStay)
+				{
+					FilteredHoles.push_back(Holles[u]);
+				}
 			}
+
+			Holles = std::move(FilteredHoles);
 
 			// Adding of the holles in the grids, they will be represented by a 2.
 			for (int j = 0; j < Holles.size(); ++j) {
@@ -320,6 +332,8 @@ AAMazeGenerator::AAMazeGenerator()
 	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(SceneRoot);
 
+	SceneRoot->SetMobility(EComponentMobility::Static);
+
 	// Create a Hierarchical Instanced Static Mesh (HISM) component that will render
 	// all maze walls as instances of the same mesh (very efficient for large mazes).
 	WallInstances = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("WallInstances"));
@@ -329,12 +343,15 @@ AAMazeGenerator::AAMazeGenerator()
 	// for better rendering/lighting performance.
 	WallInstances->SetMobility(EComponentMobility::Static);
 
-	// Create a StaticMeshComponent for the floor (single mesh scaled to maze size).
-	Floor = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Floor"));
-	Floor->SetupAttachment(SceneRoot);
+	// Floor tiles instances
+	FloorTileInstances = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("FloorTileInstances"));
+	FloorTileInstances->SetupAttachment(SceneRoot);
+	FloorTileInstances->SetMobility(EComponentMobility::Static);
 
-	// The floor also does not move at runtime.
-	Floor->SetMobility(EComponentMobility::Static);
+	// Hole marker instances (optional debug)
+	HoleMarkerInstances = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("HoleMarkerInstances"));
+	HoleMarkerInstances->SetupAttachment(RootComponent);
+	HoleMarkerInstances->SetMobility(EComponentMobility::Static);
 }
 
 
@@ -362,16 +379,46 @@ void AAMazeGenerator::BeginPlay()
 	Super::BeginPlay();
 
 	const bool bNeedWalls = (WallInstances && WallInstances->GetInstanceCount() == 0);
-	const bool bNeedFloor = (Floor && Floor->GetStaticMesh() == nullptr);
+	const bool bNeedTiles = (FloorTileInstances && FloorTileInstances->GetInstanceCount() == 0);
 
-	if (bNeedWalls || bNeedFloor)
+	if (bNeedWalls || bNeedTiles)
 	{
 		BuildMaze();
 	}
 }
 
+
+
+
 void AAMazeGenerator::BuildMaze()
 {
+	// -------------------------
+	// Safety: avoid editor-time crashes
+	// -------------------------
+
+	// 1) Never build on the Class Default Object (CDO).
+	// The CDO has no valid world and is used for defaults / blueprint class preview.
+	if (HasAnyFlags(RF_ClassDefaultObject))
+	{
+		return;
+	}
+
+	// 2) If we don't have a valid World (can happen during editor transactions), abort.
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// 3) Optional: when editor is shutting down / tearing down the world.
+	if (World->bIsTearingDown)
+	{
+		return;
+	}
+
+
+
+
 	// ---- Safety checks ----
 	if (!WallInstances)
 	{
@@ -385,109 +432,246 @@ void AAMazeGenerator::BuildMaze()
 		return;
 	}
 
-	// ---- Prepare instancing ----
+	// Floor tile system checks (you want one floor per layer -> use HISM tiles)
+	if (!FloorTileInstances)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BuildMaze(): FloorTileInstances is null."));
+		return;
+	}
+
+	if (!FloorTileMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BuildMaze(): FloorTileMesh is not assigned."));
+		// You can return or keep going without floors
+		return;
+	}
+
+	// Optional hole markers
+	const bool bUseHoleMarkers = (HoleMarkerInstances != nullptr && HoleMarkerMesh != nullptr);
+
+	// ---- Prepare instancing (clear previous build) ----
 	WallInstances->SetStaticMesh(WallMesh);
 	WallInstances->ClearInstances();
 
-	// ---- Generate maze grid (stable with Seed) ----
+	// HISM components can generate collision for every instance.
+	// With a cube mesh, this can get heavy and sometimes unstable in editor.
+	WallInstances->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WallInstances->SetGenerateOverlapEvents(false);
+
+
+	FloorTileInstances->SetStaticMesh(FloorTileMesh);
+	FloorTileInstances->ClearInstances();
+
+
+	// -------------------------
+	// Collision policy
+	// -------------------------
+
+	const bool bIsEditorWorld = (World && World->WorldType == EWorldType::Editor);
+
+	// In Editor we usually disable collisions on huge HISMs to keep the editor responsive.
+	// In Game/PIE we enable collisions so the character stands on the tiles.
+	const bool bEnableFloorCollision = (!bIsEditorWorld) && bEnableFloorCollisionInGame;
+	const bool bEnableWallCollision = (!bIsEditorWorld) && bEnableWallCollisionInGame;
+
+	// Walls
+	WallInstances->SetGenerateOverlapEvents(false);
+	WallInstances->SetCanEverAffectNavigation(false);
+	WallInstances->SetCollisionEnabled(bEnableWallCollision ? ECollisionEnabled::QueryAndPhysics
+		: ECollisionEnabled::NoCollision);
+
+	// Floor tiles
+	FloorTileInstances->SetGenerateOverlapEvents(false);
+	FloorTileInstances->SetCanEverAffectNavigation(false);
+	FloorTileInstances->SetCollisionEnabled(bEnableFloorCollision ? ECollisionEnabled::QueryAndPhysics
+		: ECollisionEnabled::NoCollision);
+
+	// You can also force a simple collision profile:
+	if (bEnableFloorCollision)
+	{
+		FloorTileInstances->SetCollisionProfileName(TEXT("BlockAll"));
+	}
+	else
+	{
+		FloorTileInstances->SetCollisionProfileName(TEXT("NoCollision"));
+	}
+
+	
+
+	if (bUseHoleMarkers)
+	{
+		HoleMarkerInstances->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		HoleMarkerInstances->SetGenerateOverlapEvents(false);
+		HoleMarkerInstances->SetCanEverAffectNavigation(false);
+		HoleMarkerInstances->SetCastShadow(false);
+		HoleMarkerInstances->bVisibleInRayTracing = false;
+
+		HoleMarkerInstances->SetStaticMesh(HoleMarkerMesh);
+		HoleMarkerInstances->ClearInstances();
+
+		HoleMarkerInstances->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		HoleMarkerInstances->SetGenerateOverlapEvents(false);
+	}
+
+	// ---- Generate multilayer maze (stable with Seed) ----
 	FRandomStream Rng(Seed);
 
 	GenerateMaze gen;
-	const int height = MazeHeight;
-	const int width = MazeWidth;
+	int32 Height = MazeHeight;
+	int32 Width = MazeWidth;
 
-	std::vector<uint8_t> grid = gen.BacktrackingMazeGenerator(Rng, height, width);
+	#if WITH_EDITOR
+	if (World && World->WorldType == EWorldType::Editor && bPreviewReduceResolution && !bFullBuildInEditor)
+	{
+		Height = FMath::Clamp(PreviewHeight, 5, MazeHeight);
+		Width = FMath::Clamp(PreviewWidth, 5, MazeWidth);
+	}
+	#endif
+
+	std::vector<std::vector<uint8_t>> MultiGrid = gen.GenerateMultiLayerMaze(Rng, Height, Width);
+
+	// -------------------------
+	// Editor preview limiter (prevents OOM when changing meshes/properties)
+	// -------------------------
+	int32 LayersToBuild = static_cast<int32>(MultiGrid.size());
+
+	#if WITH_EDITOR
+	if (World && World->WorldType == EWorldType::Editor && !bFullBuildInEditor)
+	{
+		LayersToBuild = FMath::Min(LayersToBuild, PreviewMaxLayers);
+	}
+	#endif
 
 	// ---- Centering (maze centered around actor origin) ----
-	const float halfX = (static_cast<float>(height - 1) * CellSize) * 0.5f;
-	const float halfY = (static_cast<float>(width - 1) * CellSize) * 0.5f;
+	const float HalfX = (static_cast<float>(Height - 1) * CellSize) * 0.5f;
+	const float HalfY = (static_cast<float>(Width - 1) * CellSize) * 0.5f;
 
-	// ---- Wall mesh bounds -> compute scale ----
-	const FBoxSphereBounds Bounds = WallMesh->GetBounds();
-	const FVector MeshSize = Bounds.BoxExtent * 2.0f;
+	// ---- Wall mesh bounds -> compute wall scale ----
+	const FBoxSphereBounds WallBounds = WallMesh->GetBounds();
+	const FVector WallMeshSize = WallBounds.BoxExtent * 2.0f;
 
-	if (MeshSize.X <= KINDA_SMALL_NUMBER || MeshSize.Y <= KINDA_SMALL_NUMBER || MeshSize.Z <= KINDA_SMALL_NUMBER)
+	if (WallMeshSize.X <= KINDA_SMALL_NUMBER || WallMeshSize.Y <= KINDA_SMALL_NUMBER || WallMeshSize.Z <= KINDA_SMALL_NUMBER)
 	{
 		UE_LOG(LogTemp, Error, TEXT("BuildMaze(): WallMesh has invalid bounds size."));
 		return;
 	}
 
 	// Scale walls so that each cell is exactly CellSize wide/deep, and height = WallHeight
-	const float ScaleX = CellSize / MeshSize.X;
-	const float ScaleY = CellSize / MeshSize.Y;
-	const float ScaleZ = WallHeight / MeshSize.Z;
+	const float WallScaleX = CellSize / WallMeshSize.X;
+	const float WallScaleY = CellSize / WallMeshSize.Y;
+	const float WallScaleZ = WallHeight / WallMeshSize.Z;
 
 	// Place walls on the floor even if pivot isn't centered
-	const float LocalBottomZ = Bounds.Origin.Z - Bounds.BoxExtent.Z;
-	const float ZOffset = -LocalBottomZ * ScaleZ;
+	const float WallLocalBottomZ = WallBounds.Origin.Z - WallBounds.BoxExtent.Z;
+	const float WallZOffset = -WallLocalBottomZ * WallScaleZ;
 
-	// ---- Spawn wall instances ----
-	for (int i = 0; i < height; ++i)
+	// ---- Floor tile mesh bounds -> compute tile scale (each cell gets one tile) ----
+	const FBoxSphereBounds TileBounds = FloorTileMesh->GetBounds();
+	const FVector TileMeshSize = TileBounds.BoxExtent * 2.0f;
+
+	if (TileMeshSize.X <= KINDA_SMALL_NUMBER || TileMeshSize.Y <= KINDA_SMALL_NUMBER)
 	{
-		for (int j = 0; j < width; ++j)
+		UE_LOG(LogTemp, Error, TEXT("BuildMaze(): FloorTileMesh has invalid bounds size."));
+		return;
+	}
+
+	// We want 1 tile per cell => scale tile so it covers exactly one CellSize x CellSize
+	const float TileScaleX = CellSize / TileMeshSize.X;
+	const float TileScaleY = CellSize / TileMeshSize.Y;
+	const float TileScaleZ = 1.0f; // keep thickness as in mesh (or expose a parameter if you want)
+
+	// If the tile mesh pivot is not centered, compensate so instances align with cell centers
+	const float TileOffsetX = -TileBounds.Origin.X * TileScaleX;
+	const float TileOffsetY = -TileBounds.Origin.Y * TileScaleY;
+
+	// If you want tile to sit exactly on Z = LayerBaseZ + FloorZ, and tile pivot is not at bottom:
+	const float TileLocalBottomZ = TileBounds.Origin.Z - TileBounds.BoxExtent.Z;
+	const float TileZOffset = -TileLocalBottomZ * TileScaleZ;
+
+	// ---- Build each layer ----
+	const float LayerHeight = WallHeight + FloorThickness + LayerGap;
+
+	for (int32 k = 0; k < LayersToBuild; ++k)
+	{
+		const std::vector<uint8_t>& Layer = MultiGrid[k];
+
+		// Base Z for this layer
+		const float LayerBaseZ = static_cast<float>(k) * LayerHeight;
+
+		// Z for floors and walls in this layer
+		const float FloorZWorld = LayerBaseZ + FloorZ + TileZOffset;
+		const float WallZWorld = LayerBaseZ + WallZOffset;
+
+		// ---- Spawn instances cell by cell ----
+		for (int32 i = 0; i < Height; ++i)
 		{
-			const int idx = i * width + j;
-
-			if (grid[idx] == 1) // wall
+			for (int32 j = 0; j < Width; ++j)
 			{
-				const float X = (static_cast<float>(i) * CellSize) - halfX;
-				const float Y = (static_cast<float>(j) * CellSize) - halfY;
+				const int32 idx = i * Width + j;
 
-				const FTransform T(
-					FRotator::ZeroRotator,
-					FVector(X, Y, ZOffset),
-					FVector(ScaleX, ScaleY, ScaleZ)
-				);
+				// Cell center position (same coordinate system as your walls)
+				const float X = (static_cast<float>(i) * CellSize) - HalfX;
+				const float Y = (static_cast<float>(j) * CellSize) - HalfY;
 
-				WallInstances->AddInstance(T);
+				const uint8 Cell = Layer[idx];
+
+				// 1 = wall
+				if (Cell == 1)
+				{
+					const FTransform WallT(
+						FRotator::ZeroRotator,
+						FVector(X, Y, WallZWorld),
+						FVector(WallScaleX, WallScaleY, WallScaleZ)
+					);
+					WallInstances->AddInstance(WallT);
+
+					// If you want floors also under walls, you can still place tiles here.
+					// (Optional) place tiles under everything except holes:
+					const FTransform TileT(
+						FRotator::ZeroRotator,
+						FVector(X + TileOffsetX, Y + TileOffsetY, FloorZWorld),
+						FVector(TileScaleX, TileScaleY, TileScaleZ)
+					);
+					FloorTileInstances->AddInstance(TileT);
+
+					continue;
+				}
+
+				// 2 = hole => do NOT place a floor tile
+				if (Cell == 2)
+				{
+					if (bUseHoleMarkers)
+					{
+						const FTransform MarkerT(
+							FRotator::ZeroRotator,
+							FVector(X, Y, FloorZWorld + HoleMarkerZOffset),
+							FVector(1.0f, 1.0f, 1.0f)
+						);
+						HoleMarkerInstances->AddInstance(MarkerT);
+					}
+					continue;
+				}
+
+				// 0 = walkable => place floor tile
+				if (Cell == 0)
+				{
+					const FTransform TileT(
+						FRotator::ZeroRotator,
+						FVector(X + TileOffsetX, Y + TileOffsetY, FloorZWorld),
+						FVector(TileScaleX, TileScaleY, TileScaleZ)
+					);
+					FloorTileInstances->AddInstance(TileT);
+				}
 			}
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("BuildMaze(): %dx%d | Wall instances: %d"),
-		height, width, WallInstances->GetInstanceCount());
-
-	// ---- Floor auto scale ----
-	if (Floor && FloorMesh)
-	{
-		Floor->SetStaticMesh(FloorMesh);
-
-		// Total maze span in UU
-		const float MazeSpanX = height * CellSize;
-		const float MazeSpanY = width * CellSize;
-
-		const FBoxSphereBounds FB = FloorMesh->GetBounds();
-		const FVector FloorSize = FB.BoxExtent * 2.0f;
-
-		UE_LOG(LogTemp, Warning, TEXT("BuildMaze(): Floor=%s FloorMesh=%s"),
-			Floor ? TEXT("OK") : TEXT("NULL"),
-			FloorMesh ? *FloorMesh->GetName() : TEXT("NULL"));
-
-		if (FloorSize.X <= KINDA_SMALL_NUMBER || FloorSize.Y <= KINDA_SMALL_NUMBER)
-		{
-			UE_LOG(LogTemp, Error, TEXT("BuildMaze(): FloorMesh has invalid bounds size."));
-			return;
-		}
-
-		const float ScaleX_Floor = MazeSpanX / FloorSize.X;
-		const float ScaleY_Floor = MazeSpanY / FloorSize.Y;
-
-		// Floor is attached to the root => use RELATIVE transforms
-		Floor->SetRelativeScale3D(FVector(ScaleX_Floor, ScaleY_Floor, 1.0f));
-
-		// Compensate pivot offset so the floor is centered under the maze
-		const float OffsetX = -FB.Origin.X * ScaleX_Floor;
-		const float OffsetY = -FB.Origin.Y * ScaleY_Floor;
-
-		// Put the floor at FloorZ (if you want it exactly at Z=FloorZ)
-		Floor->SetRelativeLocation(FVector(OffsetX, OffsetY, FloorZ));
-
-		UE_LOG(LogTemp, Log, TEXT("BuildMaze(): Floor scale (X,Y) = (%.3f, %.3f)"),
-			ScaleX_Floor, ScaleY_Floor);
-
-		UE_LOG(LogTemp, Warning, TEXT("MazeSpanX=%.1f MazeSpanY=%.1f | FloorSizeX=%.1f FloorSizeY=%.1f | ScaleX=%.3f ScaleY=%.3f"),
-			MazeSpanX, MazeSpanY, FloorSize.X, FloorSize.Y, ScaleX_Floor, ScaleY_Floor);
-	}
+	UE_LOG(LogTemp, Log, TEXT("BuildMaze(): Layers=%d | WallInstances=%d | FloorTiles=%d | HoleMarkers=%d"),
+		static_cast<int32>(MultiGrid.size()),
+		WallInstances->GetInstanceCount(),
+		FloorTileInstances->GetInstanceCount(),
+		bUseHoleMarkers ? HoleMarkerInstances->GetInstanceCount() : 0
+	);
 }
 
 
@@ -504,6 +688,19 @@ void AAMazeGenerator::PostEditChangeProperty(FPropertyChangedEvent& PropertyChan
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
+	// When dragging sliders or rapidly changing properties, Unreal fires many events.
+	// Avoid rebuilding on every intermediate step (can cause crashes / lag).
+	if (PropertyChangedEvent.ChangeType == EPropertyChangeType::Interactive)
+	{
+		return;
+	}
+
+	// Also avoid rebuild if we are in a bad state.
+	if (HasAnyFlags(RF_ClassDefaultObject) || !GetWorld())
+	{
+		return;
+	}
+
 	const FName PropName = PropertyChangedEvent.Property
 		? PropertyChangedEvent.Property->GetFName()
 		: NAME_None;
@@ -514,8 +711,12 @@ void AAMazeGenerator::PostEditChangeProperty(FPropertyChangedEvent& PropertyChan
 		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, CellSize) ||
 		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, WallHeight) ||
 		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, WallMesh) ||
-		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorMesh) ||
-		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorZ))
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorTileMesh) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorZ) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, LayerGap) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, FloorThickness) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, HoleMarkerMesh) ||
+		PropName == GET_MEMBER_NAME_CHECKED(AAMazeGenerator, HoleMarkerZOffset))
 	{
 		BuildMaze();
 	}
