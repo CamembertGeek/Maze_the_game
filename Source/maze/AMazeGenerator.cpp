@@ -483,8 +483,7 @@ void AAMazeGenerator::BuildMaze()
 	// Floor tiles
 	FloorTileInstances->SetGenerateOverlapEvents(false);
 	FloorTileInstances->SetCanEverAffectNavigation(false);
-	FloorTileInstances->SetCollisionEnabled(bEnableFloorCollision ? ECollisionEnabled::QueryAndPhysics
-		: ECollisionEnabled::NoCollision);
+	FloorTileInstances->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
 	// You can also force a simple collision profile:
 	if (bEnableFloorCollision)
